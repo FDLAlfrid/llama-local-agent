@@ -295,7 +295,24 @@ def llama_chat_msg(messages, tools=None, max_tokens=None):
     req = urllib.request.Request(CONF["llama"].rstrip("/") + "/v1/chat/completions",
         data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=300) as r:
-        return json.load(r)["choices"][0]["message"]
+        ch = json.load(r)["choices"][0]
+        m = ch["message"]; m["_finish"] = ch.get("finish_reason"); return m
+
+def chat_full(messages, tools=None, cont=2):
+    """一次调用；若被 max_tokens 截断（finish_reason=length）则自动续写。"""
+    m = llama_chat_msg(messages, tools)
+    text = (m.get("content") or "").strip()
+    n = 0
+    while m.get("_finish") == "length" and not m.get("tool_calls") and n < cont:
+        messages = messages + [{"role": "assistant", "content": text},
+                               {"role": "user", "content": "你上一条被长度截断了，请紧接着继续写，不要重复已写内容，不要重新开头。"}]
+        m2 = llama_chat_msg(messages, None)
+        add = (m2.get("content") or "").strip()
+        if not add: break
+        text += add
+        m = m2; n += 1
+    m["content"] = text
+    return m
 
 def llama_chat(messages, max_tokens=None):
     body = json.dumps({
@@ -647,7 +664,7 @@ def process(ev):
             if time.time() - t0 > 100:
                 break                      # 总时长上限，避免一轮卡死整个会话
             try:
-                m = llama_chat_msg(msgs, TOOLS_SPEC if use_tools else None)
+                m = chat_full(msgs, TOOLS_SPEC if use_tools else None)
             except urllib.error.URLError as e:
                 reply(ev, f"[模型服务没响应] 检查 llama-server 是否在跑：{e.reason}"); return
             tcs = m.get("tool_calls") or []
@@ -663,7 +680,13 @@ def process(ev):
                     else:
                         out = exec_tool(fn.get("name"), fn.get("arguments")); seen[key] = 1; used += 1
                     print(f"[tool] {fn.get('name')} -> {out[:120]!r}", flush=True)
-                    msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": out[:6000]})
+                    if len(out) > 12000:
+                        sp = os.path.join("/tmp", "llama-out-" + time.strftime("%H%M%S") + ".txt")
+                        try:
+                            open(sp, "w").write(out)
+                            out = out[:4000] + f"\n…（共 {len(out)} 字符，完整输出已存 {sp}，需要时用 read_file 分段读）"
+                        except Exception: out = out[:12000]
+                    msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": out})
                 if dup:
                     msgs.append({"role": "user", "content": "资料已经齐了，请直接给出最终答案，不要再调用工具。"})
                 continue
@@ -672,7 +695,7 @@ def process(ev):
         if not ans and used:
             # 轮次用尽：关掉工具强制它总结已有结果
             msgs.append({"role": "user", "content": "不要再调用工具。根据上面已经拿到的结果，用中文直接回答用户的问题。"})
-            try: ans = (llama_chat_msg(msgs, None).get("content") or "").strip()
+            try: ans = (chat_full(msgs, None).get("content") or "").strip()
             except Exception as e: ans = ""
         if not ans:
             ans = "（这轮没拿到结果，换个说法再问一次，比如把路径写全）"
