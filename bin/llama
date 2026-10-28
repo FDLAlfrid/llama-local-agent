@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # llama —— 本地大模型（官方 WebUI + 内置文件工具）
 set -uo pipefail
 ROOT="${LLAMA_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -198,3 +199,17 @@ menu() {
       4) sed -n '2,8p' "$0" | sed 's/^# //' ;;
       6) role_menu ;;
       q|Q) exit 0 ;;
+      *) echo "没这个选项" ;;
+    esac
+    [ "${c:-1}" = 5 ] || { printf '\n回车返回菜单…'; read -r _; }
+  done
+}
+
+case "${1:-}" in
+  start|"") if [ -t 0 ]; then menu; else start; fi ;;
+  roleplay) roleplay ;;
+  stop) stopall ;;
+  status) "$ROOT/core/server.sh" status ;;
+  logs) "$ROOT/core/server.sh" logs ;;
+  *) sed -n '2,6p' "$0" | sed 's/^# //' ;;
+esac
