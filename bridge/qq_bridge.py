@@ -104,7 +104,8 @@ TOOLS_SPEC = [
         "parameters": {"type": "object", "properties": {
             "root": {"type": "string"}, "name": {"type": "string"},
             "kind": {"type": "string", "enum": ["any", "dir", "file"]},
-            "depth": {"type": "integer", "description": "向下查几层，默认 1"}},
+            "depth": {"type": "integer", "description": "向下查几层，默认 1"},
+            "fuzzy": {"type": "boolean", "description": "模糊匹配：字符按顺序出现或拼写接近也算命中，默认 true"}},
             "required": ["root", "name"]}}},
     {"type": "function", "function": {
         "name": "read_file",
@@ -114,9 +115,10 @@ TOOLS_SPEC = [
             "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "grep_text",
-        "description": "在文件或目录里按正则搜索内容，返回 文件:行号:内容。",
+        "description": "按正则搜索文本内容，返回 文件:行号:内容。ignore_case 默认 true；include 可按 *.py 限定文件类型；path 可以是文件或目录。",
         "parameters": {"type": "object", "properties": {
-            "pattern": {"type": "string"}, "path": {"type": "string"}, "max": {"type": "integer"}},
+            "pattern": {"type": "string"}, "path": {"type": "string"}, "max": {"type": "integer"},
+            "ignore_case": {"type": "boolean"}, "include": {"type": "string"}},
             "required": ["pattern", "path"]}}},
     {"type": "function", "function": {
         "name": "run_shell",
@@ -126,16 +128,34 @@ TOOLS_SPEC = [
             "required": ["command"]}}},
 ]
 
+HOME = os.path.expanduser("~")
+
 def resolve_path(p):
-    """容忍模型把 shell 展开写进路径：$USER、$(whoami)、~、引号。"""
+    """容忍模型瞎编的路径：占位符用户名、shell 展开、~、引号；实在没有就按末段去找。"""
     p = (p or "").strip().strip('"').strip("'")
+    for fake in ("/home/username", "/home/user", "/home/your_username", "/home/yourname", "/home/alfred"):
+        if p.startswith(fake):
+            p = HOME + p[len(fake):]; break
     if not p: return p
     if "$" in p or "`" in p:
         try:
             r = subprocess.run(["bash", "-lc", f'printf %s "{p}"'], capture_output=True, text=True, timeout=10)
             if r.stdout.strip(): p = r.stdout.strip()
         except Exception: pass
-    return os.path.expanduser(p)
+    p = os.path.expanduser(p)
+    if p and not os.path.exists(p):
+        leaf = os.path.basename(p.rstrip("/"))
+        if leaf and leaf not in ("", "/"):
+            try:
+                for root in (HOME, os.path.join(HOME, "Desktop"), os.path.join(HOME, "Documents")):
+                    for name in os.listdir(root):
+                        if name == leaf:
+                            cand = os.path.join(root, name)
+                            print(f"[path] {p} -> {cand}", flush=True)
+                            return cand
+            except Exception:
+                pass
+    return p
 
 def exec_tool(name, args):
     """统一入口：参数容错 + 单工具超时 + 异常兜底。"""
@@ -162,6 +182,13 @@ def exec_tool(name, args):
             root = resolve_path(a.get("root", "~")); kw = (a.get("name") or "").lower()
             kind = a.get("kind", "any")
             if not kw: return "[需要 name 关键词]"
+            fuzzy = a.get("fuzzy", True)
+            def hitname(n):
+                n = n.lower()
+                if kw in n: return True
+                if not fuzzy: return False
+                it = iter(n)
+                return all(ch in it for ch in kw)   # 子序列匹配：codebdy -> codebuddy
             hits, base = [], root.rstrip("/").count(os.sep)
             maxd = max(1, min(int(a.get("depth") or 1), 6))
             SKIP = {".git", "node_modules", ".cache", ".dsh", "__pycache__", ".local"}
@@ -169,12 +196,12 @@ def exec_tool(name, args):
                 if dirpath.count(os.sep) - base >= maxd:
                     dirnames[:] = []
                     for f in filenames:
-                        if kw in f.lower() and kind in ("any", "file"):
+                        if hitname(f) and kind in ("any", "file"):
                             hits.append(os.path.join(dirpath, f))
                     continue
                 dirnames[:] = [d for d in dirnames if d not in SKIP]
                 for d in dirnames:
-                    if kw in d.lower() and kind in ("any", "dir"):
+                    if hitname(d) and kind in ("any", "dir"):
                         hits.append(os.path.join(dirpath, d) + "/")
                 for f in filenames:
                     if kw in f.lower() and kind in ("any", "file"):
@@ -195,8 +222,19 @@ def exec_tool(name, args):
         if name == "grep_text":
             pat = a.get("pattern") or ""; p = resolve_path(a.get("path", ""))
             if not pat: return "[需要 pattern]"
-            r = subprocess.run(["grep", "-rInE", "--binary-files=without-match", pat, p],
-                               capture_output=True, text=True, timeout=30)
+            if not os.path.exists(p): return f"[路径不存在] {p}"
+            cmd = ["grep", "-InE", "--binary-files=without-match"]
+            if a.get("ignore_case", True): cmd.append("-i")
+            if os.path.isdir(p):
+                cmd.append("-r")
+                inc = a.get("include") or ""
+                if inc: cmd.append(f"--include={inc}")
+                for d in (".git", "node_modules", ".cache", "__pycache__", ".dsh"):
+                    cmd.append(f"--exclude-dir={d}")
+            cmd += [pat, p]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+            if r.returncode not in (0, 1):
+                return f"[grep 出错] {(r.stderr or '').strip()[:200]}"
             lines = (r.stdout or "").splitlines()[:int(a.get("max") or 40)]
             return "\n".join(lines) if lines else "（没有命中）"
         if name == "run_shell":
@@ -629,9 +667,15 @@ def run_shell(cmd, timeout=30, cwd=None):
     if not (cmd or "").strip(): return "[空命令]"
     if re.search(r"rm\s+-(rf|fr)\s+/(\s|$)", cmd) or "mkfs" in cmd:
         return "[拒绝] 危险命令"
+    if re.search(r"\b(DISPLAY|WAYLAND_DISPLAY)\s*=", cmd):
+        return "[拒绝] 不要设置 DISPLAY/WAYLAND_DISPLAY，这类命令会弹图形窗口。"
+    if re.search(r"\b(xdg-open|gio\s+open|nautilus|dolphin|thunar|explorer|gnome-open|kde-open|code\s|gedit|mousepad)\b", cmd):
+        return "[拒绝] 该命令会弹图形窗口，无人能点。请用 ls / cat / find 等命令行方式。"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS")}
     try:
         r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
-                           timeout=timeout, cwd=cwd or os.path.expanduser("~"))
+                           timeout=timeout, cwd=cwd or HOME, env=env)
         out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if (r.stderr or "").strip() else "")
         out = out.strip()
         head = "" if r.returncode == 0 else f"[退出码 {r.returncode}]\n"
