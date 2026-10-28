@@ -4,6 +4,7 @@
    - 白名单、每会话独立上下文、人设、世界书、全部持久化为 JSON
    - 不依赖第三方库，只用标准库
 """
+from fnmatch import fnmatch
 import json, os, re, threading, time, urllib.request, random, subprocess, base64, tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -90,20 +91,38 @@ def put_sess(uid, s):
 # ---------- llama ----------
 TOOLS_SPEC = [
     {"type": "function", "function": {
-        "name": "run_shell", "description": "在本机 bash 执行命令并返回输出。用于查看文件、运行程序、查系统信息。",
+        "name": "list_dir",
+        "description": "列出目录内容。only=dir 只看子目录，only=file 只看文件，pattern 可按 *.md 这类通配符过滤。",
         "parameters": {"type": "object", "properties": {
-            "command": {"type": "string", "description": "要执行的 bash 命令"}},
+            "path": {"type": "string", "description": "目录绝对路径，例如 /home/alfrid/Desktop；不要写 $HOME 或 $(whoami)"},
+            "only": {"type": "string", "enum": ["both", "dir", "file"]},
+            "pattern": {"type": "string"}},
+            "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "find_path",
+        "description": "按名字在目录下递归查找。不知道确切路径时用它，例如找名字含 codebuddy 的目录。",
+        "parameters": {"type": "object", "properties": {
+            "root": {"type": "string"}, "name": {"type": "string"},
+            "kind": {"type": "string", "enum": ["any", "dir", "file"]}},
+            "required": ["root", "name"]}}},
+    {"type": "function", "function": {
+        "name": "read_file",
+        "description": "读取文本文件，可指定起始行 start 与行数 lines（默认前 120 行）。",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "start": {"type": "integer"}, "lines": {"type": "integer"}},
+            "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "grep_text",
+        "description": "在文件或目录里按正则搜索内容，返回 文件:行号:内容。",
+        "parameters": {"type": "object", "properties": {
+            "pattern": {"type": "string"}, "path": {"type": "string"}, "max": {"type": "integer"}},
+            "required": ["pattern", "path"]}}},
+    {"type": "function", "function": {
+        "name": "run_shell",
+        "description": "在 bash 里执行命令，返回 stdout/stderr 与退出码。可指定 timeout 与 cwd。",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string"}, "timeout": {"type": "integer"}, "cwd": {"type": "string"}},
             "required": ["command"]}}},
-    {"type": "function", "function": {
-        "name": "list_dir", "description": "列出目录内容（名称、类型、大小）。",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string", "description": "目录的绝对字面路径，例如 /home/<user>/Desktop；不要写 $HOME、$(whoami) 等 shell 展开"}},
-            "required": ["path"]}}},
-    {"type": "function", "function": {
-        "name": "read_file", "description": "读取文本文件的前 N 行。",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string"}, "lines": {"type": "integer"}},
-            "required": ["path"]}}},
 ]
 
 def resolve_path(p):
@@ -118,32 +137,68 @@ def resolve_path(p):
     return os.path.expanduser(p)
 
 def exec_tool(name, args):
-    try: a = json.loads(args) if isinstance(args, str) else (args or {})
-    except Exception: a = {}
-    if name == "run_shell":
-        return run_shell(a.get("command", ""))
-    if name == "list_dir" and any(c in (a.get("path") or "") for c in "*?["):
-        import glob as _g
-        hits = _g.glob(resolve_path(a.get("path")))
-        return "\n".join(hits[:200]) if hits else "（无匹配）"
-    if name == "list_dir":
-        p = resolve_path(a.get("path", "."))
-        try:
+    """统一入口：参数容错 + 单工具超时 + 异常兜底。"""
+    try:
+        a = json.loads(args) if isinstance(args, str) else (args or {})
+        if not isinstance(a, dict): a = {}
+    except Exception:
+        return "[参数不是合法 JSON，请重新用正确的 JSON 对象调用]"
+    try:
+        if name == "list_dir":
+            p = resolve_path(a.get("path", ""))
+            if not os.path.isdir(p): return f"[不是目录] {p}"
+            only = a.get("only", "both"); pat = a.get("pattern") or ""
             rows = []
-            for e in sorted(os.scandir(p), key=lambda x: x.name)[:200]:
-                sz = e.stat().st_size if e.is_file() else 0
-                rows.append(f"{'d' if e.is_dir() else 'f'} {sz:>10} {e.name}")
-            return f"{p}:\n" + "\n".join(rows) if rows else f"{p}: (空目录)"
-        except Exception as ex:
-            return f"[list_dir 失败] {ex}"
-    if name == "read_file":
-        p = resolve_path(a.get("path", ""))
-        n = int(a.get("lines") or 120)
-        try:
+            for e in sorted(os.scandir(p), key=lambda x: (not x.is_dir(), x.name))[:300]:
+                try: sz = e.stat().st_size if e.is_file() else 0
+                except Exception: sz = 0
+                if only == "dir" and not e.is_dir(): continue
+                if only == "file" and not e.is_file(): continue
+                if pat and not fnmatch(e.name, pat): continue
+                rows.append(f"{'[D]' if e.is_dir() else '[F]'} {sz:>10}  {e.name}")
+            return (f"{p}（{len(rows)} 项）:\n" + "\n".join(rows)) if rows else f"{p}: 没有匹配的条目"
+        if name == "find_path":
+            root = resolve_path(a.get("root", "~")); kw = (a.get("name") or "").lower()
+            kind = a.get("kind", "any")
+            if not kw: return "[需要 name 关键词]"
+            hits, base = [], root.rstrip("/").count(os.sep)
+            for dirpath, dirnames, filenames in os.walk(root):
+                if dirpath.count(os.sep) - base > 4:
+                    dirnames[:] = []; continue
+                for d in dirnames:
+                    if kw in d.lower() and kind in ("any", "dir"):
+                        hits.append(os.path.join(dirpath, d) + "/")
+                for f in filenames:
+                    if kw in f.lower() and kind in ("any", "file"):
+                        hits.append(os.path.join(dirpath, f))
+                if len(hits) > 200: break
+            return "\n".join(hits[:200]) if hits else f"{root} 下没有名字含「{kw}」的条目"
+        if name == "read_file":
+            p = resolve_path(a.get("path", ""))
+            if not os.path.isfile(p): return f"[不是文件] {p}"
+            st = int(a.get("start") or 1); n = int(a.get("lines") or 120)
+            out = []
             with open(p, errors="replace") as f:
-                return "".join([next(f) for _ in range(n)])
-        except Exception as ex:
-            return f"[read_file 失败] {ex}"
+                for i, line in enumerate(f, 1):
+                    if i < st: continue
+                    if i >= st + n: break
+                    out.append(f"{i:>5}| {line.rstrip()}")
+            return "".join(x + "\n" for x in out) or "（空文件）"
+        if name == "grep_text":
+            pat = a.get("pattern") or ""; p = resolve_path(a.get("path", ""))
+            if not pat: return "[需要 pattern]"
+            r = subprocess.run(["grep", "-rInE", "--binary-files=without-match", pat, p],
+                               capture_output=True, text=True, timeout=30)
+            lines = (r.stdout or "").splitlines()[:int(a.get("max") or 40)]
+            return "\n".join(lines) if lines else "（没有命中）"
+        if name == "run_shell":
+            return run_shell(a.get("command") or "",
+                             timeout=min(int(a.get("timeout") or 30), 120),
+                             cwd=resolve_path(a.get("cwd") or "~"))
+    except subprocess.TimeoutExpired:
+        return "[执行超时]"
+    except Exception as ex:
+        return f"[{name} 出错] {type(ex).__name__}: {ex}"
     return f"[未知工具] {name}"
 
 def llama_chat_msg(messages, tools=None, max_tokens=None):
@@ -500,22 +555,41 @@ def process(ev):
     if CONF.get("ack"): reply(ev, "…")
     try:
         use_tools = CONF.get("tools", True)
-        ans = ""
-        for _round in range(5):
-            m = llama_chat_msg(msgs, TOOLS_SPEC if use_tools else None)
+        ans, seen, used = "", {}, 0
+        t0 = time.time()
+        for _round in range(8):
+            if time.time() - t0 > 100:
+                break                      # 总时长上限，避免一轮卡死整个会话
+            try:
+                m = llama_chat_msg(msgs, TOOLS_SPEC if use_tools else None)
+            except urllib.error.URLError as e:
+                reply(ev, f"[模型服务没响应] 检查 llama-server 是否在跑：{e.reason}"); return
             tcs = m.get("tool_calls") or []
             if tcs:
                 msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": tcs})
+                dup = 0
                 for tc in tcs:
                     fn = (tc.get("function") or {})
-                    out = exec_tool(fn.get("name"), fn.get("arguments"))
-                    print(f"[tool] {fn.get('name')} -> {out[:120]!r}")
+                    key = (fn.get("name"), str(fn.get("arguments")))
+                    if key in seen:
+                        out = "[重复调用，结果已在上文，不要重复执行，直接根据已有结果回答]"
+                        dup += 1
+                    else:
+                        out = exec_tool(fn.get("name"), fn.get("arguments")); seen[key] = 1; used += 1
+                    print(f"[tool] {fn.get('name')} -> {out[:120]!r}", flush=True)
                     msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": out[:6000]})
+                if dup:
+                    msgs.append({"role": "user", "content": "资料已经齐了，请直接给出最终答案，不要再调用工具。"})
                 continue
             ans = (m.get("content") or "").strip()
             break
+        if not ans and used:
+            # 轮次用尽：关掉工具强制它总结已有结果
+            msgs.append({"role": "user", "content": "不要再调用工具。根据上面已经拿到的结果，用中文直接回答用户的问题。"})
+            try: ans = (llama_chat_msg(msgs, None).get("content") or "").strip()
+            except Exception as e: ans = ""
         if not ans:
-            ans = "（没有拿到结果，可能是工具调用轮次用尽）"
+            ans = "（这轮没拿到结果，换个说法再问一次，比如把路径写全）"
         # 兼容旧写法：模型自己在正文里写 ```run``` 块
         if use_tools and not msg_has_tool_calls(msgs):
             for _ in range(2):
@@ -526,7 +600,8 @@ def process(ev):
                 msgs.append({"role": "user", "content": "【命令输出】\n" + out + "\n请据此继续，或用 ```run``` 再试一步。"})
                 ans = llama_chat(msgs) or ans
     except Exception as e:
-        reply(ev, f"[模型出错] {e}"); return
+        print(f"[err] {type(e).__name__}: {e}", flush=True)
+        reply(ev, f"[模型出错] {type(e).__name__}: {e}\n（/logs 看详情）"); return
 
     s["history"] = trim(s["history"] + [
         {"role": "user", "content": text},
@@ -542,15 +617,19 @@ def extract_run(text):
     m = re.search(r"```run\s*\n(.*?)```", text, re.S)
     return m.group(1).strip() if m else None
 
-def run_shell(cmd):
-    if re.search(r"rm\s+-rf\s+/(\s|$)", cmd):
+def run_shell(cmd, timeout=30, cwd=None):
+    if not (cmd or "").strip(): return "[空命令]"
+    if re.search(r"rm\s+-(rf|fr)\s+/(\s|$)", cmd) or "mkfs" in cmd:
         return "[拒绝] 危险命令"
     try:
-        r = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=40)
-        out = (r.stdout + r.stderr).strip()
-        return out[:3000] or f"[退出码 {r.returncode}]"
+        r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                           timeout=timeout, cwd=cwd or os.path.expanduser("~"))
+        out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if (r.stderr or "").strip() else "")
+        out = out.strip()
+        head = "" if r.returncode == 0 else f"[退出码 {r.returncode}]\n"
+        return head + (out[:6000] or "(无输出)")
     except subprocess.TimeoutExpired:
-        return "[超时 40s]"
+        return f"[超时 {timeout}s，命令可能卡住了]"
     except Exception as e:
         return f"[执行失败] {e}"
 
