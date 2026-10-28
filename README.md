@@ -184,3 +184,25 @@ QQ / 微信这类无界面的桥，走的是第三种——**默认没有护栏*
 ## License
 
 MIT
+
+## 8. 工具调用：不要只写进人设
+
+一个踩过的坑：在人设里写"你可以执行命令、读文件"，但请求里**没有 `tools` 字段**，模型就只能演戏——输出 bash、声称成功、再编一个输出。
+
+正确做法是标准 function calling：
+
+```python
+body["tools"] = [
+  {"type":"function","function":{"name":"run_shell", ...}},
+  {"type":"function","function":{"name":"list_dir",  ...}},
+]
+body["tool_choice"] = "auto"
+# 模型返回 tool_calls -> 宿主执行 -> 以 role:"tool" 回灌 -> 循环直到给出最终回答
+```
+
+完整实现见 [`bridge/qq_bridge.py`](bridge/qq_bridge.py)，包含三个坑的处理：
+
+1. **路径展开** — 8B 会把 `$HOME`/`$(whoami)` 写进路径参数，必须自己展开
+2. **轮次上限** — 不给上限它会一直试同一个错，5 轮封顶
+3. **模式隔离** — 角色扮演的历史会污染工作模式，切换时必须换会话文件
+
