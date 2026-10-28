@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# 从 personas.json 里选一个角色，写入 $1（目标文件）
+set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PF="$ROOT/bridge/data/personas.json"
+OUT="${1:-$ROOT/var/persona.txt}"
+python3 - "$PF" <<'PY'
+import json,sys
+P=json.load(open(sys.argv[1]))
+print("\n可选角色：")
+for i,k in enumerate(P,1): print(f"  {i}) {k}")
+print("  0) 不用角色")
+PY
+printf '选编号: '; read -r n || exit 1
+if [ "$n" = "0" ]; then rm -f "$OUT"; echo "已清除角色"; exit 0; fi
+python3 - "$PF" "$OUT" "$n" <<'PY'
+import json,sys
+P=json.load(open(sys.argv[1])); k=list(P)
+try: name=k[int(sys.argv[3])-1]
+except Exception:
+    print("编号不对"); sys.exit(1)
+open(sys.argv[2],"w").write(P[name]["prompt"])
+print(f"已选「{name}」")
+PY

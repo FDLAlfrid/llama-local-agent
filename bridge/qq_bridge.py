@@ -34,7 +34,7 @@ DEFAULTS = {
     "reply_min_interval": 45,
     "reply_probability": 0.5,
     "tools": True,
-    "sudo_pass": os.environ.get("SUDO_PASS",""),
+    "sudo_pass": "droidvm",
 }
 
 def _load(path, default):
@@ -95,7 +95,7 @@ TOOLS_SPEC = [
         "name": "list_dir",
         "description": "列出目录内容。only=dir 只看子目录，only=file 只看文件，pattern 可按 *.md 这类通配符过滤。",
         "parameters": {"type": "object", "properties": {
-            "path": {"type": "string", "description": "目录绝对路径，例如 /home/alfrid/Desktop；不要写 $HOME 或 $(whoami)"},
+            "path": {"type": "string", "description": "目录绝对路径，例如 $HOME/Desktop；不要写 $HOME 或 $(whoami)"},
             "only": {"type": "string", "enum": ["both", "dir", "file"]},
             "pattern": {"type": "string"}},
             "required": ["path"]}}},
@@ -805,6 +805,28 @@ def enqueue(ev):
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_POST(self):
+        if self.path.startswith("/save"):
+            from urllib.parse import parse_qs, urlparse
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+            q = parse_qs(urlparse(self.path).query or body)
+            def g(k, d=""):
+                v = q.get(k) or []
+                return (v[0] if v else d)
+            env = os.path.join(ROOT, "..", "var", "launch.env")
+            with open(env, "w") as f:
+                for k in ("CTX", "THREADS", "NGL", "PORT"):
+                    if g(k): f.write(f'{k}="{g(k)}"\n')
+            for k, cast in (("max_tokens", int), ("temperature", float), ("history_turns", int)):
+                if g(k):
+                    try: CONF[k] = cast(g(k))
+                    except Exception: pass
+            _save(CFG, CONF)
+            return self._send("已保存。改上下文/线程需要重启服务才生效。<a href='/settings'>返回</a>", "text/html; charset=utf-8")
+        if self.path.startswith("/restart"):
+            import subprocess as sp
+            sp.Popen(["bash", os.path.join(ROOT, "..", "core", "server.sh"), "restart"],
+                     stdout=sp.DEVNULL, stderr=sp.DEVNULL, start_new_session=True)
+            return self._send("重启中（约 10–30 秒）…<a href='/settings'>返回</a>", "text/html; charset=utf-8")
         try:
             n = int(self.headers.get("Content-Length") or 0)
             ev = json.loads(self.rfile.read(n) or b"{}")
@@ -841,6 +863,8 @@ QR_F = os.path.join(ROOT, "qqbot", "qr.txt")
 
 
 BK_DIR = os.path.join(ROOT, "..", "var", "backups")
+NO_AUTO_BACKUP = os.path.exists(os.path.join(ROOT, "var", "no-auto-backup"))
+
 def backup(keep=10):
     import shutil, time
     os.makedirs(BK_DIR, exist_ok=True)
@@ -927,12 +951,36 @@ class P(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
 
     def do_GET(self):
+        if self.path.startswith("/settings"):
+            return self._send(_settings_html(), "text/html; charset=utf-8")
         if self.path == "/qr.png":
             png = _qr_png()
             return self._send(png, "image/png") if png else self._send("no qr", code=404)
         self._send(_panel_html())
 
     def do_POST(self):
+        if self.path.startswith("/save"):
+            from urllib.parse import parse_qs, urlparse
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+            q = parse_qs(urlparse(self.path).query or body)
+            def g(k, d=""):
+                v = q.get(k) or []
+                return (v[0] if v else d)
+            env = os.path.join(ROOT, "..", "var", "launch.env")
+            with open(env, "w") as f:
+                for k in ("CTX", "THREADS", "NGL", "PORT"):
+                    if g(k): f.write(f'{k}="{g(k)}"\n')
+            for k, cast in (("max_tokens", int), ("temperature", float), ("history_turns", int)):
+                if g(k):
+                    try: CONF[k] = cast(g(k))
+                    except Exception: pass
+            _save(CFG, CONF)
+            return self._send("已保存。改上下文/线程需要重启服务才生效。<a href='/settings'>返回</a>", "text/html; charset=utf-8")
+        if self.path.startswith("/restart"):
+            import subprocess as sp
+            sp.Popen(["bash", os.path.join(ROOT, "..", "core", "server.sh"), "restart"],
+                     stdout=sp.DEVNULL, stderr=sp.DEVNULL, start_new_session=True)
+            return self._send("重启中（约 10–30 秒）…<a href='/settings'>返回</a>", "text/html; charset=utf-8")
         from urllib.parse import parse_qs
         n = int(self.headers.get("Content-Length") or 0)
         d = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode()).items()}
@@ -967,6 +1015,30 @@ class P(BaseHTTPRequestHandler):
 
 def serve_panel():
     ThreadingHTTPServer(("127.0.0.1", PANEL_PORT), P).serve_forever()
+
+def _settings_html():
+    env = {}
+    f = os.path.join(ROOT, "..", "var", "launch.env")
+    if os.path.exists(f):
+        for line in open(f):
+            if "=" in line:
+                k, v = line.split("=", 1); env[k.strip()] = v.strip().strip('"')
+    def cur(k, d): return env.get(k, str(d))
+    return ("<html><meta charset=utf-8><title>启动参数</title>"
+      "<body style='font:14px/1.6 system-ui;max-width:640px;margin:40px auto;padding:0 16px'>"
+      "<h2>启动参数</h2><p style='color:#666'>改完保存；上下文/线程/层数需点「重启服务」。</p>"
+      "<form method=post action=/save>"
+      f"<p>上下文窗口 CTX <input name=CTX value='{cur('CTX',16384)}' size=8></p>"
+      f"<p>线程数 THREADS <input name=THREADS value='{cur('THREADS',8)}' size=8></p>"
+      f"<p>GPU 层数 NGL <input name=NGL value='{cur('NGL',999)}' size=8>（0=纯 CPU）</p>"
+      f"<p>端口 PORT <input name=PORT value='{cur('PORT',8082)}' size=8></p><hr>"
+      f"<p>单次输出上限 max_tokens <input name=max_tokens value='{CONF.get('max_tokens',1024)}' size=8></p>"
+      f"<p>温度 temperature <input name=temperature value='{CONF.get('temperature',0.7)}' size=8></p>"
+      f"<p>保留历史轮数 history_turns <input name=history_turns value='{CONF.get('history_turns',10)}' size=8></p>"
+      "<p><button>保存</button></p></form>"
+      "<p><a href=/restart><button>重启服务</button></a> <a href=/>返回面板</a></p>"
+      "<p style='color:#888;margin-top:24px'>上下文窗口是 llama-server 启动参数，运行中不可改。"
+      "网页端满了会滑动窗口（--context-shift，默认开），不是摘要压缩。</p></body></html>")
 
 if __name__ == "__main__":
     port = int(CONF["port"])

@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""读取 GGUF 元数据：arch / 参数量 / 专家数 / 训练上下文。用法: gguf-info model.gguf"""
+import struct, sys
+
+SZ = {0:1,1:1,2:2,3:2,4:4,5:4,6:4,7:1,10:8,11:8,12:8}
+FMT = {0:'B',1:'b',2:'H',3:'h',4:'I',5:'i',6:'f',7:'?',10:'Q',11:'q',12:'d'}
+
+def rd(f, n):
+    b = f.read(n)
+    if len(b) != n: raise EOFError
+    return b
+
+def val(f, t):
+    if t == 8:
+        n = struct.unpack('<Q', rd(f,8))[0]; return rd(f,n).decode('utf-8','replace')
+    if t == 9:
+        et = struct.unpack('<I', rd(f,4))[0]
+        n = struct.unpack('<Q', rd(f,8))[0]
+        if et == 8:
+            for _ in range(n): val(f, 8)
+            return None
+        return [val(f,et) for _ in range(n)]
+    return struct.unpack('<'+FMT[t], rd(f,SZ[t]))[0]
+
+def main(path):
+    with open(path,'rb') as f:
+        if rd(f,4) != b'GGUF': sys.exit("不是 GGUF 文件")
+        ver = struct.unpack('<I', rd(f,4))[0]
+        n_tensors = struct.unpack('<Q', rd(f,8))[0]
+        n_kv = struct.unpack('<Q', rd(f,8))[0]
+        kv = {}
+        for _ in range(n_kv):
+            n = struct.unpack('<Q', rd(f,8))[0]
+            k = rd(f,n).decode('utf-8','replace')
+            t = struct.unpack('<I', rd(f,4))[0]
+            try: kv[k] = val(f,t)
+            except EOFError: break
+    arch = kv.get('general.architecture','?')
+    out = {
+        'arch': arch,
+        'name': kv.get('general.name',''),
+        'ctx_train': kv.get(f'{arch}.context_length', 0),
+        'n_expert': kv.get(f'{arch}.expert_count', 0) or 0,
+        'n_expert_used': kv.get(f'{arch}.expert_used_count', 0) or 0,
+        'n_layer': kv.get(f'{arch}.block_count', 0),
+        'n_params': kv.get('general.parameter_count', 0),
+    }
+    print(f"arch={out['arch']} ctx={out['ctx_train']} layers={out['n_layer']} experts={out['n_expert']} used={out['n_expert_used']}")
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1]))
