@@ -33,7 +33,7 @@ DEFAULTS = {
     "reply_min_interval": 45,
     "reply_probability": 0.5,
     "tools": True,
-    "sudo_pass": os.environ.get("SUDO_PASS", ""),
+    "sudo_pass": os.environ.get("SUDO_PASS",""),
 }
 
 def _load(path, default):
@@ -100,10 +100,11 @@ TOOLS_SPEC = [
             "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "find_path",
-        "description": "按名字在目录下递归查找。不知道确切路径时用它，例如找名字含 codebuddy 的目录。",
+        "description": "在目录里按名字查找。默认 depth=1 只查这一层；只有用户明确要求「往下找/递归」时才把 depth 调大。",
         "parameters": {"type": "object", "properties": {
             "root": {"type": "string"}, "name": {"type": "string"},
-            "kind": {"type": "string", "enum": ["any", "dir", "file"]}},
+            "kind": {"type": "string", "enum": ["any", "dir", "file"]},
+            "depth": {"type": "integer", "description": "向下查几层，默认 1"}},
             "required": ["root", "name"]}}},
     {"type": "function", "function": {
         "name": "read_file",
@@ -162,9 +163,16 @@ def exec_tool(name, args):
             kind = a.get("kind", "any")
             if not kw: return "[需要 name 关键词]"
             hits, base = [], root.rstrip("/").count(os.sep)
+            maxd = max(1, min(int(a.get("depth") or 1), 6))
+            SKIP = {".git", "node_modules", ".cache", ".dsh", "__pycache__", ".local"}
             for dirpath, dirnames, filenames in os.walk(root):
-                if dirpath.count(os.sep) - base > 4:
-                    dirnames[:] = []; continue
+                if dirpath.count(os.sep) - base >= maxd:
+                    dirnames[:] = []
+                    for f in filenames:
+                        if kw in f.lower() and kind in ("any", "file"):
+                            hits.append(os.path.join(dirpath, f))
+                    continue
+                dirnames[:] = [d for d in dirnames if d not in SKIP]
                 for d in dirnames:
                     if kw in d.lower() and kind in ("any", "dir"):
                         hits.append(os.path.join(dirpath, d) + "/")
@@ -255,7 +263,7 @@ def worldbook():
 def build_system(uid):
     s = get_sess(uid)
     if s.get("mode") == "work":
-        parts = ["你是这台机器上的编码助手，中文回答，先动手再解释。可执行命令、联网、用 sudo（echo $SUDO_PASS | sudo -S）。"]
+        parts = ["你是这台机器上的编码助手，中文回答，先动手再解释。可执行命令、联网、用 sudo（echo droidvm | sudo -S）。"]
     else:
         p = personas().get(s["persona"]) or {"prompt": ""}
         parts = [p.get("prompt", "")]
@@ -451,7 +459,7 @@ def group_context(gid):
 def build_system(uid, ev=None):
     s = get_sess(uid)
     if s.get("mode") == "work":
-        parts = ["你是这台机器上的编码助手，中文回答，先动手再解释。可执行命令、联网、用 sudo（echo $SUDO_PASS | sudo -S）。"]
+        parts = ["你是这台机器上的编码助手，中文回答，先动手再解释。可执行命令、联网、用 sudo（echo droidvm | sudo -S）。"]
     else:
         p = personas().get(s["persona"]) or {"prompt": ""}
         parts = [p.get("prompt", "")]
