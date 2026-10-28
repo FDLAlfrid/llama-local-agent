@@ -6,6 +6,7 @@
 """
 from fnmatch import fnmatch
 import json, os, re, threading, time, urllib.request, random, subprocess, base64, tempfile
+import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -121,6 +122,14 @@ TOOLS_SPEC = [
             "ignore_case": {"type": "boolean"}, "include": {"type": "string"}},
             "required": ["pattern", "path"]}}},
     {"type": "function", "function": {
+        "name": "write_file",
+        "description": "写文件。mode=overwrite 覆盖（会先备份原文件）、append 追加。父目录不存在会自动创建。",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "mode": {"type": "string", "enum": ["overwrite", "append"]}},
+            "required": ["path", "content"]}}},
+    {"type": "function", "function": {
         "name": "run_shell",
         "description": "在 bash 里执行命令，返回 stdout/stderr 与退出码。可指定 timeout 与 cwd。",
         "parameters": {"type": "object", "properties": {
@@ -156,6 +165,20 @@ def resolve_path(p):
             except Exception:
                 pass
     return p
+
+def backup_write(path):
+    """覆盖前把原文件复制到 var/backups/writes/，保留最近 100 份。"""
+    try:
+        d = os.path.join(ROOT, "..", "var", "backups", "writes")
+        os.makedirs(d, exist_ok=True)
+        dst = os.path.join(d, time.strftime("%Y%m%d-%H%M%S-") + os.path.basename(path))
+        shutil.copy2(path, dst)
+        fs = sorted((os.path.join(d, f) for f in os.listdir(d)), key=os.path.getmtime)
+        for old in fs[:-100]:
+            os.remove(old)
+        return dst
+    except Exception as e:
+        return ""
 
 def exec_tool(name, args):
     """统一入口：参数容错 + 单工具超时 + 异常兜底。"""
@@ -219,6 +242,23 @@ def exec_tool(name, args):
                     if i >= st + n: break
                     out.append(f"{i:>5}| {line.rstrip()}")
             return "".join(x + "\n" for x in out) or "（空文件）"
+        if name == "write_file":
+            p = resolve_path(a.get("path", ""))
+            content = a.get("content", "")
+            mode = a.get("mode", "overwrite")
+            if not p: return "[需要 path]"
+            for bad in ("/etc", "/usr", "/boot", "/sys", "/proc", "/dev",
+                        os.path.expanduser("~/.ssh"), os.path.expanduser("~/.gnupg")):
+                if p == bad or p.startswith(bad + "/"):
+                    return f"[拒绝] 受保护路径 {p}"
+            d = os.path.dirname(p)
+            if d: os.makedirs(d, exist_ok=True)
+            bak = ""
+            if os.path.exists(p) and mode != "append":
+                bak = backup_write(p)
+            with open(p, "a" if mode == "append" else "w", encoding="utf-8") as f:
+                f.write(content)
+            return f"已写入 {p}（{len(content)} 字符，{mode}）" + (f"；原文件备份 {bak}" if bak else "")
         if name == "grep_text":
             pat = a.get("pattern") or ""; p = resolve_path(a.get("path", ""))
             if not pat: return "[需要 pattern]"
