@@ -1,0 +1,34 @@
+{
+  "onebot_api": "http://127.0.0.1:3000",
+  "llama": "http://127.0.0.1:8082",
+  "model": "local",
+  "whitelist": [
+    "YOUR_OPENID"
+  ],
+  "allow_group": true,
+  "max_tokens": 1200,
+  "history_turns": 10,
+  "max_context_chars": 6000,
+  "temperature": 0.7,
+  "port": 8090,
+  "ack": false,
+  "system_suffix": "回答用中文，简洁直接，不要复述问题。",
+  "group_mode": "all",
+  "group_whitelist": [
+    "5D189A2F2E6C5044FF1B02D6700DF551"
+  ],
+  "keywords": [
+    "咕咕",
+    "斑鸠",
+    "大肥鱼",
+    "肥鱼"
+  ],
+  "reply_min_interval": 60,
+  "reply_probability": 0.35,
+  "tools": true,
+  "sudo_pass": "droidvm",
+  "default_persona": "大肥鱼",
+  "owner": "YOUR_OPENID",
+  "pending": [],
+  "auto_allow": true
+}

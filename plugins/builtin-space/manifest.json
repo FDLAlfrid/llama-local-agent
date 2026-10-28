@@ -1,0 +1,9 @@
+{
+  "id": "builtin-space",
+  "name": "空间",
+  "version": "1.0.0",
+  "kind": "builtin",
+  "description": "查看占用并分级清理",
+  "ui": "ui.js",
+  "actions": ["space", "clean"]
+}

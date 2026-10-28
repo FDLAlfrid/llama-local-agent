@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# llama —— 本地大模型（官方 WebUI + 内置文件工具）
+set -uo pipefail
+ROOT="${LLAMA_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+WORK="${LLAMA_WORK:-$HOME/llama-workspace}"
+PORT="${PORT:-8082}"
+export LLAMA_TOOLS="${LLAMA_TOOLS:-all}"        # 内置文件/命令工具，默认开
+export LLAMA_MCP_PROXY="${LLAMA_MCP_PROXY:-1}"  # WebUI 的 MCP 客户端
+say(){ printf '\033[36m▸\033[0m %s\n' "$*"; }
+up(){ curl -s -o /dev/null -m 2 "http://127.0.0.1:$PORT/health"; }
+
+start() {
+  mkdir -p "$WORK"
+  if up; then say "已在运行：http://127.0.0.1:$PORT"; else
+    say "启动中（模型加载约 5 秒，工作目录 $WORK）"
+    ( cd "$WORK" && setsid nohup "$ROOT/core/server.sh" start >>"$ROOT/var/boot.log" 2>&1 & )
+    for _ in $(seq 1 60); do up && break; sleep 1; done
+    up || { echo "起不来，看：$0 logs"; return 1; }
+  fi
+  command -v xdg-open >/dev/null && xdg-open "http://127.0.0.1:$PORT" >/dev/null 2>&1 &
+  say "网页：http://127.0.0.1:$PORT   文件操作：已开（能改 $WORK 里的东西）"
+}
+
+roleplay() {
+  local p="$ROOT/var/persona.txt"
+  printf '角色设定（留空=清除）：'; read -r line || return 0
+  if [ -z "$line" ]; then rm -f "$p"; say "已清除角色设定"; return 0; fi
+  printf '%s\n' "$line" >"$p"
+  say "已保存。打开网页后点右上角齿轮 → System prompt，粘贴下面这段："
+  echo "----------------------------------------"
+  cat "$p"
+  echo "----------------------------------------"
+  command -v xclip >/dev/null && xclip -selection clipboard <"$p" && say "（已复制到剪贴板）"
+  start
+}
+
+menu() {
+  while :; do
+    printf '\n\033[1m本地大模型\033[0m  工作目录 %s\n' "$WORK"
+    printf '  1) 启动      打开网页，能读写文件\n'
+    printf '  2) 角色扮演  设个人设再启动\n'
+    printf '  3) 停止\n  4) 状态\n  5) 日志\n  6) 帮助\n  q) 退出\n'
+    printf '选择 [1]: '; read -r c || exit 0
+    case "${c:-1}" in
+      1) start ;;
+      2) roleplay ;;
+      3) "$ROOT/core/server.sh" stop ;;
+      4) "$ROOT/core/server.sh" status ;;
+      5) "$ROOT/core/server.sh" logs ;;
+      6) sed -n '2,6p' "$0" | sed 's/^# //' ;;
+      q|Q) exit 0 ;;
+      *) echo "没这个选项" ;;
+    esac
+    [ "${c:-1}" = 5 ] || { printf '\n回车返回菜单…'; read -r _; }
+  done
+}
+
+case "${1:-}" in
+  start|"") if [ -t 0 ]; then menu; else start; fi ;;
+  roleplay) roleplay ;;
+  stop) "$ROOT/core/server.sh" stop ;;
+  status) "$ROOT/core/server.sh" status ;;
+  logs) "$ROOT/core/server.sh" logs ;;
+  *) sed -n '2,6p' "$0" | sed 's/^# //' ;;
+esac

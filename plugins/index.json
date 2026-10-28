@@ -1,0 +1,10 @@
+{
+  "schema": "llama.plugins/v1",
+  "generated": "2026-10-29",
+  "plugins": [
+    {"id":"builtin-status","name":"状态","version":"1.0.0","kind":"builtin","path":"plugins/builtin-status"},
+    {"id":"builtin-role","name":"角色","version":"1.0.0","kind":"builtin","path":"plugins/builtin-role"},
+    {"id":"builtin-space","name":"空间","version":"1.0.0","kind":"builtin","path":"plugins/builtin-space"},
+    {"id":"builtin-qq","name":"QQ","version":"1.0.0","kind":"builtin","path":"plugins/builtin-qq"}
+  ]
+}

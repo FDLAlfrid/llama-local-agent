@@ -72,7 +72,7 @@
   const rpBtn = document.createElement('button');
   rpBtn.textContent = '角色';
   rpBtn.style.cssText = 'all:unset;cursor:pointer;padding:2px 8px;border-radius:6px;background:#3a3a44;color:#fff';
-  box.insertBefore(rpBtn, btn);
+  rpBtn.style.display='none'; /* 已迁移为 builtin-role 插件 */
   const dr = document.createElement('div');
   dr.style.cssText = 'position:fixed;right:14px;bottom:120px;z-index:99999;width:420px;max-height:70vh;overflow:auto;background:rgba(22,22,26,.98);border:1px solid #333;border-radius:10px;padding:10px;display:none;font:12px/1.6 system-ui;color:#ddd';
   document.body.appendChild(dr);
@@ -114,11 +114,11 @@
   const mgBtn = document.createElement('button');
   mgBtn.textContent = '管理';
   mgBtn.style.cssText = 'all:unset;cursor:pointer;padding:2px 8px;border-radius:6px;background:#3a3a44;color:#fff';
-  box.insertBefore(mgBtn, btn);
+  mgBtn.style.display='none'; /* 已迁移为 builtin-status/space/qq 插件 */
   const mp = document.createElement('div');
   mp.style.cssText = 'position:fixed;right:14px;bottom:160px;z-index:99999;width:300px;background:rgba(22,22,26,.98);border:1px solid #333;border-radius:10px;padding:10px;display:none;font:12px/1.7 system-ui;color:#ddd';
   document.body.appendChild(mp);
-  let TAB = 'space';
+  let TAB = 'status';
   async function drawMg() {
     const sp = await (await fetch('/__ctx/space')).json();
     const info = await (await fetch('/__ctx/info')).json();
@@ -157,7 +157,7 @@
       body = `<pre id="lg" style="max-height:240px;overflow:auto;background:#111;color:#bbb;padding:6px;border-radius:6px;font:11px/1.5 ui-monospace;white-space:pre-wrap">加载中…</pre>
         <div style="display:flex;gap:6px;margin-top:6px"><button id="rf" style="all:unset;cursor:pointer;padding:3px 10px;border-radius:6px;background:#3a3a44">刷新</button><button id="lc" style="all:unset;cursor:pointer;padding:3px 10px;border-radius:6px;background:#d9534f;color:#fff">清空日志</button></div>`;
     }
-    mp.innerHTML = `<div style="display:flex;gap:6px;margin-bottom:8px">${tabBtn('space','空间')}${tabBtn('status','状态')}${tabBtn('bridge','QQ')}${tabBtn('logs','日志')}<span style="flex:1"></span><button data-close="1" style="all:unset;cursor:pointer;opacity:.6">关闭</button></div>${body}`;
+    mp.innerHTML = `<div style="display:flex;gap:6px;margin-bottom:8px">${tabBtn('status','状态')}${tabBtn('bridge','QQ')}${tabBtn('logs','日志')}<span style="flex:1"></span><button data-close="1" style="all:unset;cursor:pointer;opacity:.6">关闭</button></div>${body}`;
     mp.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { TAB = b.dataset.tab; drawMg(); });
     mp.querySelector('[data-close]').onclick = () => { mp.style.display = 'none'; };
     if (TAB === 'space') mp.querySelectorAll('[data-clean]').forEach(b => b.onclick = async () => {

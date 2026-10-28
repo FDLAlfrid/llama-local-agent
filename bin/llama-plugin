@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# llama 插件管理：list / new <id> --tpl kv|prompt / rm <id>
+ROOT="${LLAMA_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+PY=/usr/bin/python3
+case "${1:-list}" in
+  list) "$PY" - "$ROOT" <<'P'
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], "core"))
+from pluginhost import PluginHost
+for p in PluginHost(sys.argv[1]).list():
+    print(f"{'✓' if p['enabled'] else '✗'} {p['id']:<18} {p['version']:<8} {p['name']}  — {p['description']}")
+P
+  ;;
+  new)
+    id="${2:-}"; shift 2 || true; tpl=kv; name=""
+    while [ $# -gt 0 ]; do case "$1" in --tpl) tpl="$2"; shift 2;; --name) name="$2"; shift 2;; *) shift;; esac; done
+    [ -z "$id" ] && { echo "用法: llama-plugin new <id> [--tpl kv|prompt] [--name 显示名]"; exit 1; }
+    "$PY" - "$ROOT" "$id" "$tpl" "$name" <<'P'
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], "core"))
+from pluginhost import scaffold
+ok, msg = scaffold(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] or None)
+print(("已创建 " if ok else "失败 ") + msg)
+P
+    ;;
+  spec) cat "$ROOT/docs/plugin-spec.md" ;;
+  rm) [ -n "$2" ] && rm -rf "$ROOT/plugins/$2" && echo "已删除 $2" ;;
+  *) echo "用法: llama-plugin list | spec | new <id> --tpl kv|prompt | rm <id>" ;;
+esac

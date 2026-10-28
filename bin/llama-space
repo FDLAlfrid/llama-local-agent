@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# llama 空间查看 / 清理
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+sz(){ du -sh "$1" 2>/dev/null | cut -f1; }
+case "${1:-size}" in
+  size)
+    printf '%-14s %8s  %s\n' 路径 大小 说明
+    printf '%-14s %8s  %s\n' "$(basename "$ROOT")" "$(sz "$ROOT")" "总占用"
+    printf '%-14s %8s  %s\n' models "$(sz ${MODELS_DIR:-/models})" "模型（外部）"
+    printf '%-14s %8s  %s\n' backups "$(sz "$ROOT/var/backups")" "$(ls "$ROOT/var/backups" 2>/dev/null | wc -l) 份"
+    printf '%-14s %8s  %s\n' writes "$(sz "$ROOT/var/backups/writes")" "$(ls "$ROOT/var/backups/writes" 2>/dev/null | wc -l) 份"
+    printf '%-14s %8s  %s\n' ctxstore "$(sz "$ROOT/var/ctxstore")" "$(ls "$ROOT/var/ctxstore" 2>/dev/null | wc -l) 个摘要"
+    printf '%-14s %8s  %s\n' logs "$(du -ch "$ROOT"/var/*.log 2>/dev/null | tail -1 | cut -f1)" "server/proxy/boot"
+    ;;
+  clean)
+    before=$(du -sb "$ROOT/var" | cut -f1)
+    find "$ROOT/var" -name '*.log' -size +1M -exec truncate -s 1M {} \; 2>/dev/null
+    ls -1dt "$ROOT/var/backups"/*/ 2>/dev/null | tail -n +4 | xargs -r rm -rf
+    ls -1t "$ROOT/var/backups/writes"/* 2>/dev/null | tail -n +21 | xargs -r rm -f
+    ls -1t "$ROOT/var/ctxstore"/*.json 2>/dev/null | tail -n +21 | xargs -r rm -f
+    after=$(du -sb "$ROOT/var" | cut -f1)
+    echo "清理完成：释放 $(( (before-after)/1048576 )) MB"
+    "$0" size
+    ;;
+  *) echo "用法: llama-space [size|clean]" ;;
+esac

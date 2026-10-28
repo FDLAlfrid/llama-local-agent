@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# llama-chat —— 独立本地大模型服务（不依赖 DSH，不改动 启动Qwen.sh）
+#
+# 用法：
+#   llama-chat            启动（已运行则只报告状态并打开浏览器）
+#   llama-chat stop       停止
+#   llama-chat status     查看状态
+#   llama-chat logs       跟踪日志
+#   llama-chat open       打开浏览器
+#   llama-chat list       列出可用模型
+#
+# 可选环境变量 / 参数：
+#   -m|--model PATH       指定模型文件
+#   -p|--port PORT        端口（默认 8080）
+#   -c|--ctx N            上下文（默认 16384）
+#   -t|--threads N        线程（默认 8）
+#   --ngl N               GPU 层数（默认 999，全量给核显；0 = 纯 CPU）
+#   --kv-gpu              把 KV cache 放显存（默认放内存，放显存会在 8192 token 处崩溃）
+
+set -uo pipefail
+
+LLAMA_BIN="${LLAMA_BIN:-/usr/local/llama.cpp/llama-server}"
+STATE_DIR="${LLAMA_STATE:-$HOME/llama/var}"
+LOG="$STATE_DIR/server.log"
+PIDF="$STATE_DIR/server.pid"
+MODELS_DIR="${MODELS_DIR:-${MODELS_DIR:-/models}}"
+
+PORT="${PORT:-8082}"
+HOST="${HOST:-127.0.0.1}"
+API_KEY="${API_KEY:-}"
+CTX="${CTX:-16384}"
+THREADS="${THREADS:-8}"
+NGL="${NGL:-999}"
+KV_GPU="${KV_GPU:-0}"
+MODEL=""
+
+mkdir -p "$STATE_DIR"
+
+c_dim=$'\033[2m'; c_b=$'\033[1m'; c_g=$'\033[32m'; c_y=$'\033[33m'; c_r=$'\033[31m'; c_0=$'\033[0m'
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%s✔%s %s\n' "$c_g" "$c_0" "$*"; }
+warn() { printf '%s!%s %s\n' "$c_y" "$c_0" "$*"; }
+die()  { printf '%s✘%s %s\n' "$c_r" "$c_0" "$*" >&2; exit 1; }
+
+running_pid() {
+  [ -f "$PIDF" ] || return 1
+  local p; p=$(cat "$PIDF" 2>/dev/null) || return 1
+  [ -n "${p:-}" ] || return 1
+  kill -0 "$p" 2>/dev/null || { rm -f "$PIDF"; return 1; }
+  # 僵尸进程 kill -0 仍然成功，必须看 /proc 状态
+  local st; st=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null)
+  [ "$st" = "Z" ] && { rm -f "$PIDF"; return 1; }
+  # 必须是 llama-server 本体，防止 pid 被复用
+  tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q llama-server || { rm -f "$PIDF"; return 1; }
+  echo "$p"; return 0
+}
+
+port_pid() {
+  ss -ltnp "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2
+}
+
+health() {
+  curl -s -m 3 "http://127.0.0.1:$PORT/health" 2>/dev/null
+}
+
+pick_model() {
+  if [ -n "$MODEL" ]; then
+    [ -f "$MODEL" ] || die "模型不存在：$MODEL"
+    return
+  fi
+  local -a found=()
+  [ -d "$MODELS_DIR" ] && while IFS= read -r f; do found+=("$f"); done < <(find "$MODELS_DIR" -maxdepth 2 -iname '*.gguf' -size +100M 2>/dev/null | sort)
+  if [ "${#found[@]}" -eq 0 ]; then
+    for d in "$HOME/models" "$HOME/Models" "/srv/appdata/models"; do
+      [ -d "$d" ] || continue
+      while IFS= read -r f; do found+=("$f"); done < <(find "$d" -maxdepth 2 -iname '*.gguf' -size +100M 2>/dev/null | sort)
+    done
+  fi
+  [ "${#found[@]}" -gt 0 ] || die "没找到 .gguf 模型（找了 $MODELS_DIR、~/models、/srv/appdata/models）"
+
+  if [ "${#found[@]}" -eq 1 ]; then MODEL="${found[0]}"; return; fi
+  say "${c_b}找到 ${#found[@]} 个模型：${c_0}"
+  local i=1
+  for f in "${found[@]}"; do
+    printf '  %d) %s  [%s]\n' "$i" "$f" "$(du -h "$f" | cut -f1)"
+    i=$((i+1))
+  done
+  printf '选哪个（回车=1）：'
+  local ans; read -r ans
+  ans="${ans:-1}"
+  [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le "${#found[@]}" ] || die "序号无效：$ans"
+  MODEL="${found[$((ans-1))]}"
+}
+
+open_browser() {
+  if [ "${NO_OPEN:-0}" != "1" ]; then
+    command -v xdg-open >/dev/null 2>&1 && xdg-open "http://127.0.0.1:$PORT" >/dev/null 2>&1 &
+  fi
+}
+
+do_status() {
+  local p; p=$(running_pid) || p=""
+  local h; h=$(health)
+  if [ -n "$p" ]; then
+    printf '进程  %s%s%s  pid=%s\n' "$c_g" "运行中" "$c_0" "$p"
+  elif [ -n "$(port_pid)" ]; then
+    printf '进程  %s运行中（非本脚本启动）%s  pid=%s\n' "$c_y" "$c_0" "$(port_pid)"
+  else
+    printf '进程  %s未运行%s\n' "$c_dim" "$c_0"
+  fi
+  printf '地址  http://127.0.0.1:%s\n' "$PORT"
+  if [ -n "$h" ]; then ok "健康检查：$h"; else warn "健康检查：无响应"; fi
+  if [ -f "$LOG" ]; then
+    local mdl; mdl=$(grep -o "loading model '[^']*'" "$LOG" | tail -1 | sed "s/.*\///;s/'$//")
+    [ -n "$mdl" ] && printf '模型  %s\n' "$mdl"
+    printf '日志  %s\n' "$LOG"
+  fi
+}
+
+do_start() {
+  local p
+  if p=$(running_pid); then
+    ok "已经在跑（pid=$p）"
+    do_status; open_browser; return 0
+  fi
+  [ -x "$LLAMA_BIN" ] || die "找不到 llama-server：$LLAMA_BIN"
+
+  # 端口被别的进程占着（比如 dsh 插件起的 router）就报出来，别硬起
+  local op; op=$(port_pid)
+  if [ -n "$op" ]; then
+    warn "端口 $PORT 被 pid=$op 占用（可能是 dsh-local-models 的 router）"
+    warn "换端口：llama-chat -p 8081   或先停掉它"
+    return 1
+  fi
+
+  pick_model
+  say ""
+  say "${c_b}模型${c_0}  $MODEL  [$(du -h "$MODEL" | cut -f1)]"
+  say "${c_b}窗口${c_0}  $CTX   ${c_b}线程${c_0}  $THREADS   ${c_b}GPU 层${c_0}  $NGL   ${c_b}KV${c_0}  $([ "$KV_GPU" = 1 ] && echo 显存 || echo 内存)"
+  say "${c_b}端口${c_0}  $PORT"
+  say ""
+
+  local -a args=(
+    -m "$MODEL"
+    -c "$CTX"
+    --host "$HOST" --port "$PORT"
+    -ngl "$NGL"
+    -b 2048 -ub 512
+    --flash-attn on
+    --cache-type-k q8_0 --cache-type-v q8_0
+    -t "$THREADS"
+    --jinja
+    ${LLAMA_TOOLS:+"--tools" "$LLAMA_TOOLS"}
+    ${LLAMA_MCP_PROXY:+--ui-mcp-proxy}
+    --reasoning off
+    --temp 0.6 --top-p 0.95
+    --alias local
+  )
+  # 默认把 KV 放内存：放显存时 ubatch=512 会在 8192 token 处抛 DeviceLost
+  [ "$KV_GPU" = 1 ] || args+=(--no-kv-offload)
+  [ -n "$API_KEY" ] && args+=(--api-key "$API_KEY")
+
+  : > "$LOG"
+  setsid nohup "$LLAMA_BIN" "${args[@]}" >> "$LOG" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$PIDF"
+
+  local i=0
+  while [ "$i" -lt 120 ]; do
+    if [ -n "$(health)" ]; then
+      ok "已就绪（启动耗时 ${i}s）"
+      say "本机：http://127.0.0.1:$PORT"
+      if [ "$HOST" != "127.0.0.1" ]; then
+        for ip in $(ip -4 addr show scope global 2>/dev/null | grep -oP 'inet \K[\d.]+'); do
+          say "局域网/隧道：http://$ip:$PORT"
+        done
+        [ -n "$API_KEY" ] && say "API Key：$API_KEY（请求头 Authorization: Bearer $API_KEY）"
+      fi
+      open_browser
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      warn "进程已退出，最后 15 行日志："
+      tail -15 "$LOG"
+      return 1
+    fi
+    sleep 1; i=$((i+1))
+  done
+  warn "120 秒内没起来，看日志：llama-chat logs"
+  return 1
+}
+
+do_stop() {
+  local p
+  if p=$(running_pid); then
+    kill "$p" 2>/dev/null
+    local i=0; while kill -0 "$p" 2>/dev/null && [ "$i" -lt 15 ]; do sleep 1; i=$((i+1)); done
+    kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
+    rm -f "$PIDF"; ok "已停止（pid=$p）"
+  else
+    local op; op=$(port_pid)
+    if [ -n "$op" ]; then
+      warn "端口 $PORT 上还有 pid=$op（不是本脚本启动的），没动它"
+    else
+      say "本来就没在跑"
+    fi
+  fi
+}
+
+do_list() {
+  say "${c_b}模型目录${c_0} $MODELS_DIR"
+  find "$MODELS_DIR" -maxdepth 2 -iname '*.gguf' -printf '  %s\t%p\n' 2>/dev/null | sort -rn | awk -F'\t' '{printf "  %6.2f GB  %s\n", $1/1073741824, $2}'
+}
+
+# ---- 解析参数 ----
+case "${1:-}" in
+  stop)    do_stop; exit 0 ;;
+  status)  do_status; exit 0 ;;
+  logs)    tail -f "$LOG" ;;
+  open)    open_browser; exit 0 ;;
+  list)    do_list; exit 0 ;;
+  -h|--help|help)
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  ""|start) : ;;
+  -*) SHIFT_CMD=0 ;;
+  *) die "未知命令：$1（可用：start|stop|status|logs|open|list）" ;;
+esac
+
+[ "${SHIFT_CMD:-1}" = 1 ] && shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -m|--model)   MODEL="$2"; shift 2 ;;
+    -p|--port)    PORT="$2"; shift 2 ;;
+    -c|--ctx)     CTX="$2"; shift 2 ;;
+    -t|--threads) THREADS="$2"; shift 2 ;;
+    --ngl)        NGL="$2"; shift 2 ;;
+    --kv-gpu)     KV_GPU=1; shift ;;
+    --lan)        HOST=0.0.0.0; shift ;;
+    --api-key)    API_KEY="$2"; shift 2 ;;
+    *) die "未知参数：$1" ;;
+  esac
+done
+
+do_start

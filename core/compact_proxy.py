@@ -16,6 +16,8 @@ def n_ctx():
             return int(json.load(r)["default_generation_settings"]["n_ctx"])
     except Exception:
         return 40960
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+from pluginhost import PluginHost
 LIMIT = int(n_ctx() * float(os.environ.get("LIMIT_RATIO", "0.8")))
 STATE = {"est": 0, "limit": LIMIT, "last": None}
 CWD_NOISE = ("当前工作目录已设置为", "当前工作目录已切换", "Current working directory")
@@ -57,6 +59,18 @@ def compress(msgs):
     return [{"role":"system","content":packed}] + keep, fid, len(head), len(s)
 
 RP = os.path.join(ROOT, "bridge", "data")
+PL = PluginHost(ROOT)
+
+def plug_get(pid):
+    m = PL.items.get(pid) or {}
+    fp = PL.data_file(pid, "kv.json")
+    if not fp: return {}
+    try: return json.load(open(fp, encoding="utf-8"))
+    except Exception: return {}
+
+def plug_set(pid, kv):
+    fp = PL.data_file(pid, "kv.json")
+    if fp: json.dump(kv, open(fp, "w", encoding="utf-8"), ensure_ascii=False)
 
 def _du(p):
     tot = 0
@@ -257,6 +271,35 @@ class H(BaseHTTPRequestHandler):
         for k,v in (extra or {}).items(): self.send_header(k,v)
         self.end_headers(); self.wfile.write(body)
     def do_GET(self):
+        if self.path == "/__plugin/list":
+            return self._out(200, json.dumps(PL.list(), ensure_ascii=False))
+        if self.path.startswith("/__plugin/"):
+            rest = self.path[len("/__plugin/"):]
+            pid, _, act = rest.partition("/")
+            if act.startswith("ui.js"):
+                ui = PL.read_ui(pid)
+                return (self._out(200, ui.encode(), "application/javascript; charset=utf-8")
+                        if ui else self._out(404, "no ui"))
+            if act.startswith("get"):
+                q = dict(x.split("=") for x in (self.path.split("?",1)[1] if "?" in self.path else "").split("&") if "=" in x)
+                kv = plug_get(pid); k = q.get("key")
+                val = kv.get(k, "") if k else json.dumps(kv, ensure_ascii=False)
+                return self._out(200, val.encode(), "text/plain; charset=utf-8")
+            if act.startswith("set"):
+                qs = dict(x.split("=") for x in (self.path.split("?",1)[1] if "?" in self.path else "").split("&") if "=" in x)
+                if "value" in qs and "key" in qs:
+                    kv = plug_get(pid); kv[qs["key"]] = urllib.parse.unquote(qs["value"])
+                    plug_set(pid, kv); return self._out(200, b"ok", "text/plain")
+                body = raw.decode() if raw else "{}"
+                try: d = json.loads(body)
+                except Exception: d = {"value": body}
+                kv = plug_get(pid)
+                k = dict(x.split("=") for x in (self.path.split("?",1)[1] if "?" in self.path else "").split("&") if "=" in x).get("key")
+                if k: kv[k] = d.get("value", "")
+                else: kv.update(d)
+                plug_set(pid, kv)
+                return self._out(200, b"ok", "text/plain")
+            return self._out(404, "unknown plugin action")
         if self.path.startswith("/__ctx/qr"):
             try:
                 import qrcode
@@ -294,7 +337,9 @@ class H(BaseHTTPRequestHandler):
                 if r.headers.get("Content-Encoding") == "gzip":
                     data = gzip.decompress(data)
             if "text/html" in ct and b"</body>" in data:
-                data = data.replace(b"</body>", b'<script src="/__ctx/cmdbar.js"></script></body>', 1)
+                tags = '<script src="/__ctx/cmdbar.js"></script>' + "".join(
+                    f'<script src="/__plugin/{i}/ui.js"></script>' for i in PL.scripts())
+                data = data.replace(b"</body>", tags.encode() + b"</body>", 1)
             self._out(200, data, ct)
         except Exception as e:
             self._out(502, json.dumps({"error":str(e)}))
