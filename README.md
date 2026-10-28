@@ -102,6 +102,85 @@ llama-server \
 - 没有长期记忆，新对话是白纸
 - 工具执行需在 WebUI 确认（设计如此，别关）
 
+
+## 7. 扩展工具（MCP 与自写脚本）
+
+`--tools all` 给的是**内置 7 个工具**，到此为止。想让模型多会一件事，有两条路。
+
+### 7.1 先判断：真的需要新工具吗
+
+`exec_shell_command` 等于"能运行任何程序"。所以「让它会画表情包」不需要新增工具：
+
+> 你写个 Python 脚本，用 Pillow 画 400x400 白底黑框，文字自动折行，存到 /tmp/x.png
+
+它会自己 `pip install pillow`、写脚本、跑、看报错再改。**先把这条路走通，再考虑 MCP。**
+
+### 7.2 MCP：把外部程序变成工具
+
+llama.cpp 自己**不实现**具体工具，它当 MCP 客户端。`--ui-mcp-proxy` 的作用是让 WebUI 去连你配置的 MCP server。
+
+```bash
+llama-server ... --tools all --ui-mcp-proxy
+```
+
+然后在 WebUI 的 **Settings → MCP Servers** 里登记 server（命令 + 参数 + 环境变量）。server 暴露的每个 tool 会以 `mcp__<server>__<tool>` 的形式出现在工具列表里。
+
+⚠️ 这个功能在快速演进，flag 名称各版本可能不同。以你装的版本为准：
+
+```bash
+llama-server --help | grep -i mcp
+```
+
+### 7.3 不依赖 MCP 的工具循环（30 行）
+
+思路：让模型把要执行的命令写在 ```run 代码块里，宿主执行、把结果回灌，最多两轮。
+
+```python
+import re, subprocess
+
+def extract_run(text):
+    m = re.search(r"```run\s*\n(.*?)```", text, re.S)
+    return m.group(1).strip() if m else None
+
+def run_shell(cmd, timeout=40):
+    if re.search(r"rm\s+-rf\s+/(\s|$)", cmd):
+        return "[拒绝] 危险命令"
+    r = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=timeout)
+    return ((r.stdout + r.stderr).strip() or f"[退出码 {r.returncode}]")[:3000]
+
+# 主循环
+for _ in range(2):
+    code = extract_run(answer)
+    if not code: break
+    out = run_shell(code)
+    messages += [{"role": "assistant", "content": answer},
+                 {"role": "user", "content": f"【命令输出】\n{out}\n请据此继续。"}]
+    answer = chat(messages)
+```
+
+好处：不依赖 MCP、能跑在任何 OpenAI 兼容端点上、行为完全可控。
+代价：没有权限确认弹窗——**必须自己做危险命令拦截**（上面那条 `rm -rf /` 只是最低限度）。
+
+### 7.4 安全边界
+
+| 方式 | 谁在把关 |
+|---|---|
+| WebUI + 内置工具 | 每次执行弹确认框 |
+| WebUI + MCP | 取决于 MCP server 自己 |
+| 自己的工具循环 | 只有你写的白名单 |
+
+QQ / 微信这类无界面的桥，走的是第三种——**默认没有护栏**，上线前务必加白名单或容器隔离。
+
+---
+
+## 8. 文件清单
+
+| 文件 | 内容 |
+|---|---|
+| `install.sh` | 一键编译安装（含 Vulkan 探测） |
+| `docs/pitfalls.md` | 8 个坑的完整记录与实验数据 |
+| `README.md` | 本文 |
+
 ## License
 
 MIT
